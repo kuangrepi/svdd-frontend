@@ -8,10 +8,10 @@ import numpy as np
 import io
 import base64
 import matplotlib
+import os
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import os
 
 # === 导入模型 ===
 from models import LogSpectrogram 
@@ -30,23 +30,23 @@ app.add_middleware(
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL = None
 SAMPLE_RATE = 44100
-MAX_LEN = 44100 * 4 
+CHUNK_DURATION = 4         # 每次分析 4 秒
+CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_DURATION
+STRIDE = 2                 # 步长 2 秒 (重叠 50% 扫描，防止漏掉边界特征)
 
-# ⚠️ 这里的路径非常关键！
-# 建议先用官方提供的 'model_mixed.pth' (改名后)，不要用自己瞎跑出来的测试模型
-model_path = "resnet18_mixture.pth" 
+# 确保这里的路径是对的
+MODEL_PATH = "resnet18_mixture.pth" 
 
 @app.on_event("startup")
 async def load_model():
     global MODEL
     print(f"🔄 正在加载模型，使用设备: {DEVICE}...")
-    if not os.path.exists(model_path):
-        print(f"❌ 错误：找不到文件 {model_path}，请确认文件名正确！")
+    if not os.path.exists(MODEL_PATH):
+        print(f"❌ 错误：找不到文件 {MODEL_PATH}")
         return
-        
     try:
         MODEL = LogSpectrogram(device=DEVICE)
-        checkpoint = torch.load(model_path, map_location=DEVICE)
+        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
         if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
             MODEL.load_state_dict(checkpoint['state_dict'])
         else:
@@ -57,33 +57,56 @@ async def load_model():
     except Exception as e:
         print(f"❌ 模型加载失败: {e}")
 
-def preprocess_audio(audio_bytes):
-    # 强制单声道加载
+# === 核心逻辑修改：把整首歌切成很多个 4s 片段 ===
+def chunk_audio(audio_bytes):
+    # 1. 读取完整音频
     y, sr = librosa.load(io.BytesIO(audio_bytes), sr=SAMPLE_RATE, mono=True)
     
-    # 长度处理
-    if len(y) >= MAX_LEN:
-        y_out = y[:MAX_LEN]
-    else:
-        num_repeats = int(MAX_LEN / len(y)) + 1
-        padded_x = np.tile(y, (1, num_repeats))
-        y_out = padded_x[0][:MAX_LEN] if len(padded_x.shape) > 1 else padded_x[:MAX_LEN]
-
-    tensor = torch.FloatTensor(y_out).unsqueeze(0)
-    return y_out, tensor.to(DEVICE)
+    # 如果音频短于 4秒，强制填充到 4秒
+    if len(y) < CHUNK_SAMPLES:
+        pad_len = CHUNK_SAMPLES - len(y)
+        y = np.pad(y, (0, pad_len), mode='wrap')
+    
+    # 2. 切片 (Sliding Window)
+    # 使用步长 (STRIDE * sr) 进行滑动切割
+    chunks = []
+    stride_samples = int(STRIDE * SAMPLE_RATE)
+    
+    # 从头切到尾
+    for start in range(0, len(y) - CHUNK_SAMPLES + 1, stride_samples):
+        chunk = y[start : start + CHUNK_SAMPLES]
+        chunks.append(chunk)
+    
+    # 如果最后剩下一截不够步长，但也凑够4s的，也加上
+    if len(chunks) == 0: # 只有一段的情况
+        chunks.append(y[:CHUNK_SAMPLES])
+        
+    print(f"🔪 音频切片完成：共生成 {len(chunks)} 个片段")
+    
+    # 3. 转成 Tensor Batch [N, 176400]
+    # 也就是一次性把 N 个片段都堆在一起
+    batch_tensor = torch.FloatTensor(np.array(chunks)).to(DEVICE)
+    
+    return y, batch_tensor # 返回原始音频(画图用) 和 切片后的Tensor(推理用)
 
 def generate_visual_evidence(y, sr, is_fake):
-    D = librosa.stft(y)
+    # 画图只画前 10 秒或者整首，不然图太长了
+    # 这里我们只取前 4 秒画图，或者取一个典型的片段
+    display_len = min(len(y), SAMPLE_RATE * 10) 
+    y_display = y[:display_len]
+    
+    D = librosa.stft(y_display)
     S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
+    
     plt.figure(figsize=(12, 6))
     librosa.display.specshow(S_db, sr=sr, x_axis='time', y_axis='log')
     plt.colorbar(format='%+2.0f dB')
-    plt.title('Spectrogram (STFT)')
+    plt.title('Spectrogram Analysis (First 10s)')
     plt.tight_layout()
 
     if is_fake:
-        # 画红框
-        rect = patches.Rectangle((0.5, 5000), 2.5, 15000, linewidth=3, edgecolor='red', facecolor='none')
+        # 画红框 (示意图)
+        rect = patches.Rectangle((0.5, 5000), 2.0, 15000, linewidth=3, edgecolor='red', facecolor='none')
         plt.gca().add_patch(rect)
         plt.text(0.5, 2000, "DeepFake Artifacts Detected", color='red', fontsize=14, weight='bold', backgroundcolor='white')
 
@@ -93,6 +116,7 @@ def generate_visual_evidence(y, sr, is_fake):
     buf.seek(0)
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
+# === 4. 接口入口 (修复版) ===
 @app.post("/api/predict")
 async def predict(file: UploadFile = File(...)):
     if MODEL is None:
@@ -100,44 +124,53 @@ async def predict(file: UploadFile = File(...)):
     
     try:
         content = await file.read()
-        y_processed, input_tensor = preprocess_audio(content)
         
+        # 1. 获取 切片Batch
+        y_full, input_batch = chunk_audio(content)
+        
+        # 2. 批量推理
+        all_scores = []
         with torch.no_grad():
-            dummy_labels = torch.tensor([0]).to(DEVICE)
-            output, _ = MODEL(input_tensor, dummy_labels)
-            
-            # 获取原始 Logits
-            raw_logit = output.squeeze().item()
-            # 获取 Sigmoid 概率
-            score = torch.sigmoid(output).squeeze().item()
-            
-        # ====================================================
-        # 🕵️‍♂️ 侦探模式：在后台打印真实分数，帮你找原因
-        # ====================================================
-        print(f"\n======== 分析文件: {file.filename} ========")
-        print(f"1. 原始输出 (Logit): {raw_logit}")
-        print(f"2. 最终得分 (Score): {score}")
-        print(f"   (0.0 = 极假/极真?,  1.0 = 极真/极假?)")
+            batch_size = 8 
+            for i in range(0, len(input_batch), batch_size):
+                batch_x = input_batch[i : i+batch_size]
+                dummy_labels = torch.zeros(len(batch_x)).to(DEVICE)
+                output, _ = MODEL(batch_x, dummy_labels)
+                
+                scores = torch.sigmoid(output).squeeze().cpu().numpy()
+                if scores.ndim == 0:
+                    all_scores.append(scores.item())
+                else:
+                    all_scores.extend(scores.tolist())
         
-        # ⚠️ 核心判定逻辑修正 ⚠️
-        # 方案 A: 如果训练时 0=Fake, 1=Real
-        is_fake = score < 0.5  
+        # 3. 统计全曲得分
+        avg_score = np.mean(all_scores)
+        min_score = np.min(all_scores)
         
-        # 方案 B: 如果训练时 1=Fake, 0=Real (如果方案A不对，就改成这个)
-        # is_fake = score > 0.5 
-
-        print(f"3. 当前判定结果: {'🚨 Fake (假)' if is_fake else '✅ Real (真)'}")
-        print(f"===========================================\n")
-
-        img_base64 = generate_visual_evidence(y_processed, SAMPLE_RATE, is_fake)
+        print(f"📊 分析详情: 共有 {len(all_scores)} 个片段")
+        print(f"   平均分: {avg_score:.4f}")
+        print(f"   最低分: {min_score:.4f}")
+        
+        # === ⚠️ 关键修改点：类型转换 ⚠️ ===
+        
+        # 将 numpy.float 转为 python float
+        final_score = float(avg_score) 
+        
+        # 将 numpy.bool_ 转为 python bool
+        is_fake = bool(final_score < 0.5)
+        
+        # ===================================
+        
+        # 生成图片
+        img_base64 = generate_visual_evidence(y_full, SAMPLE_RATE, is_fake)
         
         return {
             "code": 200,
             "message": "success",
             "data": {
-                "score": score,
-                "is_fake": is_fake,
-                "label": "AI Synthetic" if is_fake else "Real Singing",
+                "score": final_score, # 现在是原生 float
+                "is_fake": is_fake,   # 现在是原生 bool
+                "label": "AI Synthetic (DeepFake)" if is_fake else "Real Singing Voice",
                 "evidence_image": "data:image/png;base64," + img_base64
             }
         }
