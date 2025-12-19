@@ -80,10 +80,7 @@
           </div>
           
           <div class="image-wrapper">
-            <!-- 
-              这里用来显示后端返回的 Base64 图片 
-              src 必须加上 'data:image/png;base64,' 前缀
-            -->
+            <!-- 直接显示后端返回的 Base64 图片 -->
             <img :src="result.evidence_image" alt="Evidence" class="evidence-img" />
           </div>
           
@@ -113,38 +110,59 @@ const result = ref(null)       // 存放最终结果
 
 // --- 方法定义 ---
 
-// 1. 文件被选择时
+// 1. 文件被选择时触发
 const handleFileChange = (uploadFile) => {
   file.value = uploadFile.raw
   result.value = null
 }
 
-// 2. 点击开始检测
+// 2. 点击开始检测 (连接真实后端)
 const startAnalysis = async () => {
-  if (!file.value) return
+  if (!file.value) {
+    ElMessage.warning('请先选择音频文件！')
+    return
+  }
   
   loading.value = true
   progress.value = 0
   
-  // 模拟进度条跑动效果
+  // 搞个虚假的进度条动画 (为了体验好)
   const timer = setInterval(() => {
-    if (progress.value < 90) progress.value += 10
-  }, 200)
+    if (progress.value < 80) progress.value += 5
+  }, 300)
 
   try {
-    // ==========================================
-    // ⚠️ 这里是模拟接口 (Mock)，不用开后端也能跑
-    // ==========================================
-    const mockResponse = await mockBackendRequest()
+    // A. 准备表单数据
+    const formData = new FormData()
+    // 这里的 key 'file' 必须对应后端 api_server.py 里的参数名
+    formData.append('file', file.value) 
+
+    // B. 发送真实请求给后端
+    // 假设后端地址是 127.0.0.1:8000
+    const response = await axios.post('http://127.0.0.1:8000/api/predict', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000 // 超时时间设为60秒
+    })
+
+    // C. 处理结果
+    const resData = response.data
     
-    // 拿到结果
-    result.value = mockResponse
-    progress.value = 100
-    ElMessage.success('检测完成')
+    if (resData.code === 200) {
+      // 成功！保存数据
+      result.value = resData.data
+      progress.value = 100
+      ElMessage.success('检测完成')
+    } else {
+      // 后端报错 (比如文件损坏)
+      ElMessage.error('后端处理失败: ' + resData.message)
+    }
 
   } catch (error) {
-    ElMessage.error('检测失败')
+    console.error(error)
+    // 网络错误 (后端没开，或者跨域问题)
+    ElMessage.error('连接失败：请确认后端黑窗口是否已启动！')
   } finally {
+    // 无论成功失败，都停止加载动画
     clearInterval(timer)
     loading.value = false
   }
@@ -156,30 +174,6 @@ const reset = () => {
   result.value = null
   loading.value = false
   progress.value = 0
-}
-
-// --- 模拟后端接口函数 ---
-const mockBackendRequest = () => {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      // 随机生成 真/假 结果，方便你测试两种情况
-      const isFake = Math.random() > 0.5 
-      
-      // 模拟一张频谱图 (这里用占位图代替，真实后端会返回 Base64 字符串)
-      // 如果是假声，给一张带红框的图；如果是真声，给一张普通的图
-      const fakeImage = 'https://dummyimage.com/600x250/fff/f00&text=Spectrogram+(Fake+Artifacts+Detected)'
-      const realImage = 'https://dummyimage.com/600x250/fff/0f0&text=Spectrogram+(Natural+Voice)'
-
-      resolve({
-        score: isFake ? 0.98 : 0.05,
-        is_fake: isFake,
-        label: isFake ? 'AI 合成音频 (DeepFake)' : '真实人声 (Real)',
-        // 真实开发时，这里是 base64 字符串，比如 "data:image/png;base64,iVBORw0KG..."
-        // 这里为了演示，直接放 URL，效果一样
-        evidence_image: isFake ? fakeImage : realImage
-      })
-    }, 2000) // 假装分析了2秒
-  })
 }
 </script>
 
