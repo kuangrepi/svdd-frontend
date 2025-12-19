@@ -158,35 +158,59 @@ const startAnalysis = async () => {
   
   loading.value = true
   progress.value = 0
+  
+  // ✨✨✨ 优化后的进度条逻辑：渐近式增长，不会死卡 ✨✨✨
+  // 每 800 毫秒动一次 (变慢一点)
   const timer = setInterval(() => {
-    if (progress.value < 80) progress.value += 5
-  }, 300)
+    if (progress.value < 40) {
+      // 第一阶段：快速冲到 40% (模拟上传)
+      progress.value += Math.floor(Math.random() * 7 + 3)
+    } else if (progress.value < 70) {
+      // 第二阶段：中速处理
+      progress.value += Math.floor(Math.random() * 5 + 1)
+    } else if (progress.value < 95) {
+      // 第三阶段：龟速蠕动 (给后端留足时间)
+      progress.value += 1
+    } else if (progress.value < 99) {
+      // 第四阶段：卡在 99% 等结果，绝不到 100%
+      progress.value += 0.1
+    }
+    // 限制最大 99%，防止溢出
+    if (progress.value > 99) progress.value = 99
+  }, 800)
 
   try {
     const formData = new FormData()
     formData.append('file', file.value) 
 
+    // 发送请求
     const response = await axios.post('http://127.0.0.1:8000/api/predict', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120000 
+      timeout: 300000 // ⚠️ 将超时设为 5分钟 (防止大文件处理慢导致断开)
     })
 
     const resData = response.data
     
     if (resData.code === 200) {
-      result.value = resData.data
+      // 拿到结果瞬间，进度条拉满
       progress.value = 100
-      ElMessage.success('检测完成')
+      // 稍微延迟一点点显示结果，让用户看到 100% 的瞬间
+      setTimeout(() => {
+        result.value = resData.data
+        ElMessage.success('检测完成')
+        loading.value = false // 停止加载动画
+      }, 500)
     } else {
       ElMessage.error('后端处理失败: ' + resData.message)
+      loading.value = false
     }
 
   } catch (error) {
     console.error(error)
-    ElMessage.error('连接失败：请确认后端是否启动！')
-  } finally {
-    clearInterval(timer)
+    ElMessage.error('连接失败：请确认后端是否启动，或文件是否过大！')
     loading.value = false
+  } finally {
+    clearInterval(timer) // 清除定时器
   }
 }
 
