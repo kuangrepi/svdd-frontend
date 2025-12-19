@@ -7,7 +7,7 @@
       <template #header>
         <div class="header-box">
           <h2>🎤 歌声 DeepFake 检测系统</h2>
-          <p class="subtitle">请上传音频文件 (.wav / .mp3) 进行分析</p>
+          <p class="subtitle">请上传音频文件进行分析</p>
         </div>
       </template>
 
@@ -20,7 +20,7 @@
           :auto-upload="false"
           :on-change="handleFileChange"
           :show-file-list="false"
-          accept=".wav,.mp3"
+          accept=".wav,.mp3,.flac"
         >
           <el-icon class="el-icon--upload"><upload-filled /></el-icon>
           <div class="el-upload__text">
@@ -28,7 +28,7 @@
           </div>
           <template #tip>
             <div class="el-upload__tip">
-              建议上传时长 4秒 以上的音频片段
+              支持长音频自动切片分析
             </div>
           </template>
         </el-upload>
@@ -37,7 +37,7 @@
       <!-- 3. 选中文件后的状态 -->
       <div v-if="file && !result" class="file-status">
         <el-alert
-          :title="`已准备就绪: ${file.name}`"
+          :title="`已选择: ${file.name}`"
           type="info"
           show-icon
           :closable="false"
@@ -53,14 +53,18 @@
       <!-- 4. 检测中动画 -->
       <div v-if="loading" class="loading-box">
         <el-progress type="circle" :percentage="progress" />
-        <p>正在进行频谱特征分析...</p>
+        <p>正在进行全曲切片扫描...</p>
       </div>
 
-      <!-- 5. 结果展示页 (带图片) -->
+      <!-- 5. 结果展示页 -->
       <div v-if="result" class="result-container">
-        <el-divider>检测报告</el-divider>
+        
+        <!-- 头部：文件名 -->
+        <div class="result-header">
+          <div class="filename-tag">🎵 分析对象: {{ result.filename }}</div>
+        </div>
 
-        <!-- 结果结论 -->
+        <!-- 结论 -->
         <div class="verdict-box" :class="result.is_fake ? 'fake-style' : 'real-style'">
           <div class="icon">
             <el-icon v-if="result.is_fake"><WarningFilled /></el-icon>
@@ -68,25 +72,58 @@
           </div>
           <div class="info">
             <h3>{{ result.label }}</h3>
-            <p>置信度: <strong>{{ (result.score * 100).toFixed(1) }}%</strong></p>
+            <p>综合置信度: <strong>{{ (result.score * 100).toFixed(1) }}%</strong></p>
           </div>
         </div>
 
-        <!-- 可视化证据图片 -->
+        <!-- ⚠️ 重点：Top 3 伪造片段展示 (点击放大) -->
+        <div v-if="result.is_fake && result.suspicious_segments.length > 0" class="segments-section">
+          <div class="section-title">⚠️ 发现高危伪造片段 (Top 3) - 点击图片放大</div>
+          <div class="segments-grid">
+            <div 
+              v-for="(seg, idx) in result.suspicious_segments" 
+              :key="idx" 
+              class="segment-card"
+            >
+              <div class="seg-img-wrapper">
+                <el-image 
+                  :src="seg.image" 
+                  class="seg-img"
+                  :preview-src-list="[seg.image]"
+                  fit="contain"
+                  hide-on-click-modal
+                  preview-teleported
+                >
+                  <template #error>
+                    <div class="image-slot"><el-icon><icon-picture /></el-icon></div>
+                  </template>
+                </el-image>
+              </div>
+              <div class="seg-info">
+                <span class="time-badge">{{ seg.start }}s - {{ seg.end }}s</span>
+                <span class="score-badge">真实度: {{ (seg.score * 100).toFixed(1) }}%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 整体概览图 (点击放大) -->
         <div class="evidence-box">
           <div class="evidence-header">
-            <span>📊 频谱特征分析图</span>
-            <el-tag v-if="result.is_fake" type="danger" size="small">发现异常高频伪影</el-tag>
+            <span>📊 整体频谱概览 (前10秒)</span>
           </div>
-          
           <div class="image-wrapper">
-            <!-- 直接显示后端返回的 Base64 图片 -->
-            <img :src="result.evidence_image" alt="Evidence" class="evidence-img" />
+            <el-image 
+              :src="result.evidence_image" 
+              class="evidence-img"
+              :preview-src-list="[result.evidence_image]"
+              fit="contain"
+              hide-on-click-modal
+              preview-teleported
+            />
           </div>
-          
           <p class="desc">
-            * <span v-if="result.is_fake">红框区域标记了模型识别到的 DeepFake 生成痕迹（常见于高频部分）。</span>
-            <span v-else>频谱图纹理自然，未发现明显的合成特征。</span>
+            * 上图为音频的梅尔频谱图 (Mel-Spectrogram)，展示了声音在频域上的能量分布特征。
           </p>
         </div>
 
@@ -101,22 +138,18 @@
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
+import { WarningFilled, CircleCheckFilled, UploadFilled, Picture as IconPicture } from '@element-plus/icons-vue'
 
-// --- 变量定义 ---
-const file = ref(null)         // 存放当前文件
-const loading = ref(false)     // 是否正在加载
-const progress = ref(0)        // 进度条数字
-const result = ref(null)       // 存放最终结果
+const file = ref(null)
+const loading = ref(false)
+const progress = ref(0)
+const result = ref(null)
 
-// --- 方法定义 ---
-
-// 1. 文件被选择时触发
 const handleFileChange = (uploadFile) => {
   file.value = uploadFile.raw
   result.value = null
 }
 
-// 2. 点击开始检测 (连接真实后端)
 const startAnalysis = async () => {
   if (!file.value) {
     ElMessage.warning('请先选择音频文件！')
@@ -125,50 +158,38 @@ const startAnalysis = async () => {
   
   loading.value = true
   progress.value = 0
-  
-  // 搞个虚假的进度条动画 (为了体验好)
   const timer = setInterval(() => {
     if (progress.value < 80) progress.value += 5
   }, 300)
 
   try {
-    // A. 准备表单数据
     const formData = new FormData()
-    // 这里的 key 'file' 必须对应后端 api_server.py 里的参数名
     formData.append('file', file.value) 
 
-    // B. 发送真实请求给后端
-    // 假设后端地址是 127.0.0.1:8000
     const response = await axios.post('http://127.0.0.1:8000/api/predict', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 60000 // 超时时间设为60秒
+      timeout: 120000 
     })
 
-    // C. 处理结果
     const resData = response.data
     
     if (resData.code === 200) {
-      // 成功！保存数据
       result.value = resData.data
       progress.value = 100
       ElMessage.success('检测完成')
     } else {
-      // 后端报错 (比如文件损坏)
       ElMessage.error('后端处理失败: ' + resData.message)
     }
 
   } catch (error) {
     console.error(error)
-    // 网络错误 (后端没开，或者跨域问题)
-    ElMessage.error('连接失败：请确认后端黑窗口是否已启动！')
+    ElMessage.error('连接失败：请确认后端是否启动！')
   } finally {
-    // 无论成功失败，都停止加载动画
     clearInterval(timer)
     loading.value = false
   }
 }
 
-// 3. 重置页面
 const reset = () => {
   file.value = null
   result.value = null
@@ -185,49 +206,35 @@ const reset = () => {
   min-height: 100vh;
   background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
   font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', sans-serif;
+  padding: 20px;
 }
 
 .box-card {
-  width: 600px;
+  width: 750px;
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(0,0,0,0.1);
 }
 
-.header-box {
-  text-align: center;
-}
+.header-box { text-align: center; }
+.subtitle { color: #909399; font-size: 14px; margin-top: 5px; }
+.upload-area { padding: 20px; }
+.file-status { text-align: center; margin: 20px 0; }
+.btn-group { margin-top: 20px; }
+.loading-box { text-align: center; padding: 40px; }
+.loading-box p { margin-top: 15px; color: #409EFF; }
 
-.subtitle {
-  color: #909399;
-  font-size: 14px;
-  margin-top: 5px;
-}
+/* 结果区域 */
+.result-container { padding: 10px; }
 
-.upload-area {
-  padding: 20px;
-}
-
-.file-status {
-  text-align: center;
-  margin: 20px 0;
-}
-
-.btn-group {
-  margin-top: 20px;
-}
-
-.loading-box {
-  text-align: center;
-  padding: 40px;
-}
-.loading-box p {
-  margin-top: 15px;
-  color: #409EFF;
-}
-
-/* 结果区域样式 */
-.result-container {
-  padding: 10px;
+.filename-tag {
+  background: #ecf5ff;
+  color: #409eff;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-weight: bold;
+  display: inline-block;
+  margin-bottom: 15px;
+  border: 1px solid #d9ecff;
 }
 
 .verdict-box {
@@ -237,70 +244,71 @@ const reset = () => {
   border-radius: 8px;
   margin-bottom: 20px;
 }
+.fake-style { background-color: #fef0f0; border: 2px solid #ffdede; color: #f56c6c; }
+.real-style { background-color: #f0f9eb; border: 2px solid #e1f3d8; color: #67c23a; }
+.icon { font-size: 40px; margin-right: 15px; display: flex; align-items: center; }
 
-.fake-style {
-  background-color: #fef0f0;
-  border: 2px solid #ffdede;
+/* 伪造片段展示区 */
+.segments-section {
+  margin-bottom: 25px;
+  background: #fffafa;
+  padding: 15px;
+  border-radius: 8px;
+  border: 1px dashed #ffcccc;
+}
+.section-title {
   color: #f56c6c;
+  font-weight: bold;
+  margin-bottom: 10px;
+  font-size: 15px;
 }
-
-.real-style {
-  background-color: #f0f9eb;
-  border: 2px solid #e1f3d8;
-  color: #67c23a;
-}
-
-.icon {
-  font-size: 40px;
-  margin-right: 15px;
+.segments-grid {
   display: flex;
+  gap: 15px;
+  justify-content: space-between;
+}
+.segment-card {
+  flex: 1;
+  background: white;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+.seg-img-wrapper {
+  width: 100%;
+  height: 90px;
+  background: #f5f7fa;
+  display: flex;
+  justify-content: center;
   align-items: center;
 }
+.seg-img {
+  width: 100%;
+  height: 100%;
+}
+.seg-info {
+  padding: 8px;
+  text-align: center;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.time-badge { background: #909399; color: white; padding: 2px 6px; border-radius: 10px; font-size: 11px;}
+.score-badge { color: #f56c6c; font-weight: bold; }
 
-/* 证据图样式 */
+/* 概览图 */
 .evidence-box {
   border: 1px solid #dcdfe6;
   border-radius: 8px;
   padding: 15px;
   background-color: #fff;
 }
+.evidence-header { margin-bottom: 10px; font-weight: bold; color: #303133; }
+.image-wrapper { width: 100%; background-color: #f5f7fa; border-radius: 4px; overflow: hidden; }
+.evidence-img { width: 100%; display: block; }
 
-.evidence-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-  font-weight: bold;
-  color: #303133;
-}
-
-.image-wrapper {
-  width: 100%;
-  height: 200px;
-  background-color: #f5f7fa;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  overflow: hidden;
-  border-radius: 4px;
-}
-
-.evidence-img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-}
-
-.desc {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 10px;
-  line-height: 1.4;
-}
-
-.re-upload-btn {
-  width: 100%;
-  margin-top: 20px;
-  padding: 20px;
-}
+.desc { font-size: 12px; color: #909399; margin-top: 10px; line-height: 1.4; }
+.re-upload-btn { width: 100%; margin-top: 20px; padding: 20px; }
 </style>
