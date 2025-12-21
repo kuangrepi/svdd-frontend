@@ -10,6 +10,7 @@ import numpy as np
 import io
 import base64
 import matplotlib
+import tempfile
 import os
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
@@ -61,15 +62,31 @@ async def load_model():
 
 # === 切片逻辑 ===
 def chunk_audio(audio_bytes):
-    # 读取完整音频
-    y, sr = librosa.load(io.BytesIO(audio_bytes), sr=SAMPLE_RATE, mono=True)
+    # 1. 创建临时文件 (为了兼容 librosa 读取 MP3)
+    # delete=False 是为了兼容 Windows，Windows 不允许打开已被打开的文件
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+        tmp_file.write(audio_bytes)
+        tmp_file_path = tmp_file.name
+
+    try:
+        # 2. 读取音频 (传入文件路径，而不是 bytes)
+        # 这样 librosa 就会自动调用 ffmpeg 后端来处理 MP3
+        y, sr = librosa.load(tmp_file_path, sr=SAMPLE_RATE, mono=True)
+    except Exception as e:
+        print(f"音频读取失败: {e}")
+        # 如果读取失败，抛出异常给上层处理
+        raise e
+    finally:
+        # 3. 删掉临时文件 (打扫战场)
+        if os.path.exists(tmp_file_path):
+            os.remove(tmp_file_path)
     
-    # 填充
+    # 4. 如果音频短于 4秒，填充
     if len(y) < CHUNK_SAMPLES:
         pad_len = CHUNK_SAMPLES - len(y)
         y = np.pad(y, (0, pad_len), mode='wrap')
     
-    # 切片
+    # 5. 切片
     chunks = []
     stride_samples = int(STRIDE * SAMPLE_RATE)
     

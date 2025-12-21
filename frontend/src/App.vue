@@ -164,7 +164,7 @@ const startAnalysis = async () => {
   const timer = setInterval(() => {
     if (progress.value < 40) {
       // 第一阶段：快速冲到 40% (模拟上传)
-      progress.value += Math.floor(Math.random() * 7 + 3)
+      progress.value += Math.floor(Math.random() * 6 + 3)
     } else if (progress.value < 70) {
       // 第二阶段：中速处理
       progress.value += Math.floor(Math.random() * 5 + 1)
