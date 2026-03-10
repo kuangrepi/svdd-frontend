@@ -99,7 +99,7 @@ DeepFake_Project/
 3.  **评分逻辑**：
     *   模型输出 Logits，经过 Sigmoid 转换为 0~1 的分数。
     *   **Label 0 = Fake (假)**, **Label 1 = Real (真)**。
-    *   系统计算全曲所有切片的平均分，若 `Average Score < 0.5`，则判定为 **AI 合成**。
+    *   系统计算全曲所有切片的平均分，若 `Average Score < 0.5`，则判定为 **AI 合成音乐**。
 
 ---
 
