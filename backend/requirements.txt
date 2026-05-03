@@ -13,3 +13,6 @@ soundfile==0.12.1
 tensorboard==2.18.0
 tqdm==4.66.5
 nnAudio==0.3.3
+huggingface_hub
+requests
+PyYAML

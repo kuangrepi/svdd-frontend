@@ -1,0 +1,8 @@
+encoder:
+  backbone: efficientnet_b0
+  embedding_dim: 1000
+  pretrained: false
+feature_extractor:
+  hop_length: 512
+  n_fft: 2048
+  spec_layer: melspectogram

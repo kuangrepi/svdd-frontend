@@ -2,7 +2,7 @@
 <template>
   <div class="main-container">
     <el-card class="box-card">
-      
+
       <!-- 1. 标题头 -->
       <template #header>
         <div class="header-box">
@@ -58,7 +58,7 @@
 
       <!-- 5. 结果展示页 -->
       <div v-if="result" class="result-container">
-        
+
         <!-- 头部：文件名 -->
         <div class="result-header">
           <div class="filename-tag">🎵 分析对象: {{ result.filename }}</div>
@@ -76,18 +76,45 @@
           </div>
         </div>
 
-        <!-- ⚠️ 重点：Top 3 伪造片段展示 (点击放大) -->
+        <!-- 歌手身份分析 -->
+        <div v-if="result.singer_identity" class="singer-section">
+          <div class="section-title-singer">🎤 歌手身份分析</div>
+          <div v-if="!result.singer_identity.has_references" class="singer-empty">
+            尚未添加参考歌手，无法进行身份匹配
+          </div>
+          <div v-else class="singer-matches">
+            <div
+              v-for="(match, idx) in result.singer_identity.top_matches"
+              :key="idx"
+              class="singer-match-row"
+            >
+              <span class="singer-rank">{{ ['最佳', '第二', '第三'][idx] }}</span>
+              <span class="singer-name">{{ match.name }}</span>
+              <el-progress
+                :percentage="Math.max(0, match.similarity) * 100"
+                :format="() => simPercent(match.similarity)"
+                :color="idx === 0 ? '#409EFF' : '#909399'"
+                style="flex: 1; margin: 0 12px;"
+              />
+            </div>
+          </div>
+          <el-button size="small" style="margin-top: 12px;" @click="openSingerDialog">
+            管理参考歌手
+          </el-button>
+        </div>
+
+        <!-- ⚠️ Top 3 伪造片段展示 -->
         <div v-if="result.is_fake && result.suspicious_segments.length > 0" class="segments-section">
           <div class="section-title">⚠️ 发现高危伪造片段 (Top 3) - 点击图片放大</div>
           <div class="segments-grid">
-            <div 
-              v-for="(seg, idx) in result.suspicious_segments" 
-              :key="idx" 
+            <div
+              v-for="(seg, idx) in result.suspicious_segments"
+              :key="idx"
               class="segment-card"
             >
               <div class="seg-img-wrapper">
-                <el-image 
-                  :src="seg.image" 
+                <el-image
+                  :src="seg.image"
                   class="seg-img"
                   :preview-src-list="[seg.image]"
                   fit="contain"
@@ -107,14 +134,14 @@
           </div>
         </div>
 
-        <!-- 整体概览图 (点击放大) -->
+        <!-- 整体概览图 -->
         <div class="evidence-box">
           <div class="evidence-header">
             <span>📊 整体频谱概览 (前10秒)</span>
           </div>
           <div class="image-wrapper">
-            <el-image 
-              :src="result.evidence_image" 
+            <el-image
+              :src="result.evidence_image"
               class="evidence-img"
               :preview-src-list="[result.evidence_image]"
               fit="contain"
@@ -131,6 +158,71 @@
       </div>
 
     </el-card>
+
+    <!-- 歌手管理对话框 -->
+    <el-dialog
+      v-model="singerReferenceDialog"
+      title="管理参考歌手"
+      width="500px"
+      destroy-on-close
+    >
+      <el-tabs v-model="singerDialogTab">
+
+        <!-- 已有歌手列表 -->
+        <el-tab-pane label="已有歌手" name="list">
+          <div v-if="singerList.length === 0" class="singer-dialog-empty">
+            暂无参考歌手，请在「添加歌手」页面添加
+          </div>
+          <el-table v-else :data="singerList" style="width: 100%">
+            <el-table-column prop="name" label="歌手名称" />
+            <el-table-column prop="clips_count" label="片段数" width="80" />
+            <el-table-column label="操作" width="80">
+              <template #default="{ row }">
+                <el-button type="danger" size="small" @click="deleteSinger(row.name)">
+                  删除
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
+        <!-- 添加新歌手 -->
+        <el-tab-pane label="添加歌手" name="add">
+          <el-form label-position="top" style="padding: 10px 0;">
+            <el-form-item label="歌手名称">
+              <el-input
+                v-model="newSingerName"
+                placeholder="例如：Taylor Swift"
+                clearable
+              />
+            </el-form-item>
+            <el-form-item label="参考音频（建议 5–30 秒清晰演唱片段）">
+              <el-upload
+                :auto-upload="false"
+                :on-change="handleSingerFileChange"
+                :show-file-list="true"
+                :limit="1"
+                :on-exceed="() => ElMessage.warning('只能上传一个文件，请先移除已有文件')"
+                accept=".wav,.mp3,.flac"
+              >
+                <el-button>选择音频文件</el-button>
+              </el-upload>
+            </el-form-item>
+            <el-form-item>
+              <el-button
+                type="primary"
+                :loading="addingSinger"
+                @click="addSingerReference"
+              >
+                添加参考
+              </el-button>
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+
+      </el-tabs>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -140,10 +232,23 @@ import { ElMessage } from 'element-plus'
 import axios from 'axios'
 import { WarningFilled, CircleCheckFilled, UploadFilled, Picture as IconPicture } from '@element-plus/icons-vue'
 
+const BASE_URL = 'http://127.0.0.1:8000'
+
+// --- Deepfake detection state ---
 const file = ref(null)
 const loading = ref(false)
 const progress = ref(0)
 const result = ref(null)
+
+// --- Singer identity state ---
+const singerReferenceDialog = ref(false)
+const singerDialogTab = ref('list')
+const singerList = ref([])
+const newSingerName = ref('')
+const newSingerFile = ref(null)
+const addingSinger = ref(false)
+
+// ---- Deepfake detection ----
 
 const handleFileChange = (uploadFile) => {
   file.value = uploadFile.raw
@@ -155,62 +260,51 @@ const startAnalysis = async () => {
     ElMessage.warning('请先选择音频文件！')
     return
   }
-  
+
   loading.value = true
   progress.value = 0
-  
-  // ✨✨✨ 优化后的进度条逻辑：渐近式增长，不会死卡 ✨✨✨
-  // 每 800 毫秒动一次 (变慢一点)
+
   const timer = setInterval(() => {
     if (progress.value < 40) {
-      // 第一阶段：快速冲到 40% (模拟上传)
       progress.value += Math.floor(Math.random() * 6 + 3)
     } else if (progress.value < 70) {
-      // 第二阶段：中速处理
       progress.value += Math.floor(Math.random() * 5 + 1)
     } else if (progress.value < 95) {
-      // 第三阶段：龟速蠕动 (给后端留足时间)
       progress.value += 1
     } else if (progress.value < 99) {
-      // 第四阶段：卡在 99% 等结果，绝不到 100%
       progress.value += 0.1
     }
-    // 限制最大 99%，防止溢出
     if (progress.value > 99) progress.value = 99
   }, 800)
 
   try {
     const formData = new FormData()
-    formData.append('file', file.value) 
+    formData.append('file', file.value)
 
-    // 发送请求
-    const response = await axios.post('http://127.0.0.1:8000/api/predict', formData, {
+    const response = await axios.post(`${BASE_URL}/api/predict`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 300000 // ⚠️ 将超时设为 5分钟 (防止大文件处理慢导致断开)
+      timeout: 300000
     })
 
     const resData = response.data
-    
+
     if (resData.code === 200) {
-      // 拿到结果瞬间，进度条拉满
       progress.value = 100
-      // 稍微延迟一点点显示结果，让用户看到 100% 的瞬间
       setTimeout(() => {
         result.value = resData.data
         ElMessage.success('检测完成')
-        loading.value = false // 停止加载动画
+        loading.value = false
       }, 500)
     } else {
       ElMessage.error('后端处理失败: ' + resData.message)
       loading.value = false
     }
-
   } catch (error) {
     console.error(error)
     ElMessage.error('连接失败：请确认后端是否启动，或文件是否过大！')
     loading.value = false
   } finally {
-    clearInterval(timer) // 清除定时器
+    clearInterval(timer)
   }
 }
 
@@ -219,6 +313,85 @@ const reset = () => {
   result.value = null
   loading.value = false
   progress.value = 0
+}
+
+// ---- Singer identity ----
+
+const simPercent = (sim) => (Math.max(0, sim) * 100).toFixed(0) + '%'
+
+const openSingerDialog = async () => {
+  singerDialogTab.value = 'list'
+  singerReferenceDialog.value = true
+  await refreshSingerList()
+}
+
+const refreshSingerList = async () => {
+  try {
+    const resp = await axios.get(`${BASE_URL}/api/singer/list`)
+    if (resp.data.code === 200) {
+      singerList.value = resp.data.data.singers
+    }
+  } catch {
+    ElMessage.error('无法获取歌手列表')
+  }
+}
+
+const handleSingerFileChange = (uploadFile) => {
+  newSingerFile.value = uploadFile.raw
+}
+
+const addSingerReference = async () => {
+  if (!newSingerName.value.trim()) {
+    ElMessage.warning('请输入歌手名称')
+    return
+  }
+  if (!newSingerFile.value) {
+    ElMessage.warning('请上传音频片段')
+    return
+  }
+
+  addingSinger.value = true
+  try {
+    const formData = new FormData()
+    formData.append('name', newSingerName.value.trim())
+    formData.append('file', newSingerFile.value)
+
+    const resp = await axios.post(`${BASE_URL}/api/singer/add`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000
+    })
+
+    if (resp.data.code === 200) {
+      ElMessage.success(resp.data.message)
+      newSingerName.value = ''
+      newSingerFile.value = null
+      await refreshSingerList()
+      singerDialogTab.value = 'list'
+    } else {
+      ElMessage.error('添加失败: ' + resp.data.message)
+    }
+  } catch {
+    ElMessage.error('请求失败，请检查后端是否运行')
+  } finally {
+    addingSinger.value = false
+  }
+}
+
+const deleteSinger = async (name) => {
+  try {
+    const encoded = encodeURIComponent(name)
+    const resp = await axios.delete(`${BASE_URL}/api/singer/${encoded}`)
+    if (resp.data.code === 200) {
+      ElMessage.success(`已删除: ${name}`)
+      await refreshSingerList()
+    }
+  } catch (e) {
+    if (e.response?.status === 404) {
+      ElMessage.error('歌手不存在')
+    } else {
+      ElMessage.error('删除失败')
+    }
+  }
 }
 </script>
 
@@ -271,6 +444,57 @@ const reset = () => {
 .fake-style { background-color: #fef0f0; border: 2px solid #ffdede; color: #f56c6c; }
 .real-style { background-color: #f0f9eb; border: 2px solid #e1f3d8; color: #67c23a; }
 .icon { font-size: 40px; margin-right: 15px; display: flex; align-items: center; }
+
+/* 歌手身份分析 */
+.singer-section {
+  background: #f0f7ff;
+  border: 1px solid #d0e8ff;
+  border-radius: 8px;
+  padding: 15px;
+  margin-bottom: 20px;
+}
+.section-title-singer {
+  font-weight: bold;
+  color: #409EFF;
+  margin-bottom: 12px;
+  font-size: 15px;
+}
+.singer-empty {
+  color: #909399;
+  font-size: 14px;
+  padding: 4px 0;
+}
+.singer-matches {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.singer-match-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.singer-rank {
+  width: 36px;
+  font-size: 12px;
+  color: #606266;
+  text-align: right;
+  flex-shrink: 0;
+}
+.singer-name {
+  width: 130px;
+  font-size: 14px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.singer-dialog-empty {
+  text-align: center;
+  padding: 20px;
+  color: #909399;
+}
 
 /* 伪造片段展示区 */
 .segments-section {
